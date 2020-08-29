@@ -37,6 +37,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -50,6 +51,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2edeployment "k8s.io/kubernetes/test/e2e/framework/deployment"
 	e2eendpoints "k8s.io/kubernetes/test/e2e/framework/endpoints"
+	e2eendpointslice "k8s.io/kubernetes/test/e2e/framework/endpointslice"
 	e2ekubesystem "k8s.io/kubernetes/test/e2e/framework/kubesystem"
 	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -103,6 +105,9 @@ var (
 
 // portsByPodName is a map that maps pod name to container ports.
 type portsByPodName map[string][]int
+
+// portsByPodUID is a map that maps pod name to container ports.
+type portsByPodUID map[types.UID][]int
 
 // affinityCheckFromPod returns interval, timeout and function pinging the service and
 // returning pinged hosts for pinging the service from execPod.
@@ -793,7 +798,7 @@ var _ = SIGDescribe("Services", func() {
 	// TODO: We get coverage of TCP/UDP and multi-port services through the DNS test. We should have a simpler test for multi-port TCP here.
 
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Kubernetes Service
 		Description: By default when a kubernetes cluster is running there MUST be a 'kubernetes' service running in the cluster.
 	*/
@@ -803,7 +808,7 @@ var _ = SIGDescribe("Services", func() {
 	})
 
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Service, endpoints
 		Description: Create a service with a endpoint without any Pods, the service MUST run and show empty endpoints. Add a pod to the service and the service MUST validate to show all the endpoints for the ports exposed by the Pod. Add another Pod then the list of all Ports exposed by both the Pods MUST be valid and have corresponding service endpoint. Once the second Pod is deleted then set of endpoint MUST be validated to show only ports from the first container that are exposed. Once both pods are deleted the endpoints from the service MUST be empty.
 	*/
@@ -856,7 +861,7 @@ var _ = SIGDescribe("Services", func() {
 	})
 
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Service, endpoints with multiple ports
 		Description: Create a service with two ports but no Pods are added to the service yet.  The service MUST run and show empty set of endpoints. Add a Pod to the first port, service MUST list one endpoint for the Pod on that port. Add another Pod to the second port, service MUST list both the endpoints. Delete the first Pod and the service MUST list only the endpoint to the second Pod. Delete the second Pod and the service must now have empty set of endpoints.
 	*/
@@ -1019,7 +1024,7 @@ var _ = SIGDescribe("Services", func() {
 		serviceAddress := net.JoinHostPort(serviceIP, strconv.Itoa(servicePort))
 
 		for _, pausePod := range pausePods.Items {
-			sourceIP, execPodIP := execSourceipTest(pausePod, serviceAddress)
+			sourceIP, execPodIP := execSourceIPTest(pausePod, serviceAddress)
 			ginkgo.By("Verifying the preserved source ip")
 			framework.ExpectEqual(sourceIP, execPodIP)
 		}
@@ -1210,7 +1215,7 @@ var _ = SIGDescribe("Services", func() {
 	})
 
 	/*
-		Release : v1.16
+		Release: v1.16
 		Testname: Service, NodePort Service
 		Description: Create a TCP NodePort service, and test reachability from a client Pod.
 		The client Pod MUST be able to access the NodePort service by service name and cluster
@@ -2793,7 +2798,7 @@ var _ = SIGDescribe("Services", func() {
 	})
 
 	/*
-	   Release : v1.18
+	   Release: v1.18
 	   Testname: Find Kubernetes Service in default Namespace
 	   Description: List all Services in all Namespaces, response MUST include a Service named Kubernetes with the Namespace of default.
 	*/
@@ -2812,7 +2817,15 @@ var _ = SIGDescribe("Services", func() {
 		framework.ExpectEqual(foundSvc, true, "could not find service 'kubernetes' in service list in all namespaces")
 	})
 
-	ginkgo.It("should test the lifecycle of an Endpoint", func() {
+	/*
+	   Release: v1.19
+	   Testname: Endpoint resource lifecycle
+	   Description: Create an endpoint, the endpoint MUST exist.
+	   The endpoint is updated with a new label, a check after the update MUST find the changes.
+	   The endpoint is then patched with a new IPv4 address and port, a check after the patch MUST the changes.
+	   The endpoint is deleted by it's label, a watch listens for the deleted watch event.
+	*/
+	framework.ConformanceIt("should test the lifecycle of an Endpoint", func() {
 		testNamespaceName := f.Namespace.Name
 		testEndpointName := "testservice"
 		testEndpoints := v1.Endpoints{
@@ -3374,38 +3387,6 @@ var _ = SIGDescribe("ESIPP [Slow]", func() {
 	})
 })
 
-func execSourceipTest(pausePod v1.Pod, serviceAddress string) (string, string) {
-	var err error
-	var stdout string
-	timeout := 2 * time.Minute
-
-	framework.Logf("Waiting up to %v to get response from %s", timeout, serviceAddress)
-	cmd := fmt.Sprintf(`curl -q -s --connect-timeout 30 %s/clientip`, serviceAddress)
-	for start := time.Now(); time.Since(start) < timeout; time.Sleep(2 * time.Second) {
-		stdout, err = framework.RunHostCmd(pausePod.Namespace, pausePod.Name, cmd)
-		if err != nil {
-			framework.Logf("got err: %v, retry until timeout", err)
-			continue
-		}
-		// Need to check output because it might omit in case of error.
-		if strings.TrimSpace(stdout) == "" {
-			framework.Logf("got empty stdout, retry until timeout")
-			continue
-		}
-		break
-	}
-
-	framework.ExpectNoError(err)
-
-	// The stdout return from RunHostCmd is in this format: x.x.x.x:port or [xx:xx:xx::x]:port
-	host, _, err := net.SplitHostPort(stdout)
-	if err != nil {
-		// ginkgo.Fail the test if output format is unexpected.
-		framework.Failf("exec pod returned unexpected stdout: [%v]\n", stdout)
-	}
-	return pausePod.Status.PodIP, host
-}
-
 // execAffinityTestForSessionAffinityTimeout is a helper function that wrap the logic of
 // affinity test for non-load-balancer services. Session afinity will be
 // enabled when the service is created and a short timeout will be configured so
@@ -3720,7 +3701,7 @@ func enableAndDisableInternalLB() (enable func(svc *v1.Service), disable func(sv
 	return framework.TestContext.CloudConfig.Provider.EnableAndDisableInternalLB()
 }
 
-func validatePorts(ep e2eendpoints.PortsByPodUID, expectedEndpoints e2eendpoints.PortsByPodUID) error {
+func validatePorts(ep, expectedEndpoints portsByPodUID) error {
 	if len(ep) != len(expectedEndpoints) {
 		// should not happen because we check this condition before
 		return fmt.Errorf("invalid number of endpoints got %v, expected %v", ep, expectedEndpoints)
@@ -3743,8 +3724,8 @@ func validatePorts(ep e2eendpoints.PortsByPodUID, expectedEndpoints e2eendpoints
 	return nil
 }
 
-func translatePodNameToUID(c clientset.Interface, ns string, expectedEndpoints portsByPodName) (e2eendpoints.PortsByPodUID, error) {
-	portsByUID := make(e2eendpoints.PortsByPodUID)
+func translatePodNameToUID(c clientset.Interface, ns string, expectedEndpoints portsByPodName) (portsByPodUID, error) {
+	portsByUID := make(portsByPodUID)
 	for name, portList := range expectedEndpoints {
 		pod, err := c.CoreV1().Pods(ns).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
@@ -3765,20 +3746,41 @@ func validateEndpointsPorts(c clientset.Interface, namespace, serviceName string
 
 	i := 0
 	if pollErr := wait.PollImmediate(time.Second, framework.ServiceStartTimeout, func() (bool, error) {
+		i++
+
 		ep, err := c.CoreV1().Endpoints(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 		if err != nil {
 			framework.Logf("Failed go get Endpoints object: %v", err)
 			// Retry the error
 			return false, nil
 		}
-		portsByPodUID := e2eendpoints.GetContainerPortsByPodUID(ep)
-
-		i++
-		if err := validatePorts(portsByPodUID, expectedPortsByPodUID); err != nil {
+		portsByUID := portsByPodUID(e2eendpoints.GetContainerPortsByPodUID(ep))
+		if err := validatePorts(portsByUID, expectedPortsByPodUID); err != nil {
 			if i%5 == 0 {
-				framework.Logf("Unexpected endpoints: found %v, expected %v, will retry", portsByPodUID, expectedEndpoints)
+				framework.Logf("Unexpected endpoints: found %v, expected %v, will retry", portsByUID, expectedEndpoints)
 			}
 			return false, nil
+		}
+
+		// If EndpointSlice API is enabled, then validate if appropriate EndpointSlice objects
+		// were also create/updated/deleted.
+		if _, err := c.Discovery().ServerResourcesForGroupVersion(discoveryv1beta1.SchemeGroupVersion.String()); err == nil {
+			opts := metav1.ListOptions{
+				LabelSelector: "kubernetes.io/service-name=" + serviceName,
+			}
+			es, err := c.DiscoveryV1beta1().EndpointSlices(namespace).List(context.TODO(), opts)
+			if err != nil {
+				framework.Logf("Failed go list EndpointSlice objects: %v", err)
+				// Retry the error
+				return false, nil
+			}
+			portsByUID = portsByPodUID(e2eendpointslice.GetContainerPortsByPodUID(es.Items))
+			if err := validatePorts(portsByUID, expectedPortsByPodUID); err != nil {
+				if i%5 == 0 {
+					framework.Logf("Unexpected endpoint slices: found %v, expected %v, will retry", portsByUID, expectedEndpoints)
+				}
+				return false, nil
+			}
 		}
 		framework.Logf("successfully validated that service %s in namespace %s exposes endpoints %v",
 			serviceName, namespace, expectedEndpoints)

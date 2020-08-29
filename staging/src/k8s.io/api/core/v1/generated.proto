@@ -424,6 +424,7 @@ message ComponentCondition {
 }
 
 // ComponentStatus (and ComponentStatusList) holds the cluster validation info.
+// Deprecated: This API is deprecated in v1.19+
 message ComponentStatus {
   // Standard object's metadata.
   // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
@@ -438,6 +439,7 @@ message ComponentStatus {
 }
 
 // Status of all the conditions for the component as a list of ComponentStatus objects.
+// Deprecated: This API is deprecated in v1.19+
 message ComponentStatusList {
   // Standard list metadata.
   // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
@@ -716,7 +718,6 @@ message Container {
   // This can be used to provide different probe parameters at the beginning of a Pod's lifecycle,
   // when it might take a long time to load data or warm a cache, than during steady-state operation.
   // This cannot be updated.
-  // This is a beta feature enabled by the StartupProbe feature flag.
   // More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
   // +optional
   optional Probe startupProbe = 22;
